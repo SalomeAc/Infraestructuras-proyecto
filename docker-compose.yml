@@ -1,0 +1,111 @@
+version: "3.8"
+
+services:
+  # Servicio principal de la API
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      - RAY_HEAD_NODE_HOST=ray-head
+      - RAY_ADDRESS=ray://ray-head:10001
+    depends_on:
+      - ray-head
+    networks:
+      - portfolio-net
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Nodo principal de Ray
+  ray-head:
+    image: rayproject/ray:2.8.0-py39
+    command: >
+      ray start --head 
+      --dashboard-host=0.0.0.0 
+      --dashboard-port=8265 
+      --port=6379 
+      --node-ip-address=0.0.0.0 
+      --num-cpus=2 
+      --object-manager-port=8076 
+      --node-manager-port=8077 
+      --gcs-server-port=8078 
+      --min-worker-port=10000 
+      --max-worker-port=10999 
+      --block
+    ports:
+      - "8265:8265" # Ray Dashboard
+      - "10001:10001" # Ray Client Server
+      - "6379:6379" # Redis
+    networks:
+      - portfolio-net
+    restart: unless-stopped
+    shm_size: "2gb"
+    environment:
+      - RAY_DISABLE_IMPORT_WARNING=1
+
+  # Worker adicional de Ray
+  ray-worker:
+    image: rayproject/ray:2.8.0-py39
+    command: >
+      ray start 
+      --address=ray-head:6379 
+      --num-cpus=2 
+      --object-manager-port=8076 
+      --node-manager-port=8077 
+      --min-worker-port=10000 
+      --max-worker-port=10999 
+      --block
+    depends_on:
+      - ray-head
+    networks:
+      - portfolio-net
+    restart: unless-stopped
+    shm_size: "1gb"
+    environment:
+      - RAY_DISABLE_IMPORT_WARNING=1
+    deploy:
+      replicas: 2
+
+  # Cliente web
+  web-client:
+    build:
+      context: .
+      dockerfile: Dockerfile.client
+    ports:
+      - "8501:8501"
+    environment:
+      - API_URL=http://api:8000
+    depends_on:
+      - api
+    networks:
+      - portfolio-net
+    restart: unless-stopped
+
+  # Proxy reverso para balanceo de carga
+  nginx:
+    image: nginx:alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - api
+      - web-client
+    networks:
+      - portfolio-net
+    restart: unless-stopped
+
+networks:
+  portfolio-net:
+    driver: bridge
+
+volumes:
+  ray-data:
+    driver: local
